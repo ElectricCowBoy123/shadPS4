@@ -185,7 +185,7 @@ void Rasterizer::Draw(bool is_indexed, u32 index_offset) {
     RENDERER_TRACE;
 
     FlushPeriodically();
-    scheduler.PopPendingOperations();
+    scheduler.PopPendingOperations(false);
 
     if (!FilterDraw()) {
         return;
@@ -241,7 +241,7 @@ void Rasterizer::DrawIndirect(bool is_indexed, VAddr arg_address, u32 offset, u3
     RENDERER_TRACE;
 
     FlushPeriodically();
-    scheduler.PopPendingOperations();
+    scheduler.PopPendingOperations(false);
 
     if (!FilterDraw()) {
         return;
@@ -322,7 +322,7 @@ void Rasterizer::DispatchDirect() {
     RENDERER_TRACE;
 
     FlushPeriodically();
-    scheduler.PopPendingOperations();
+    scheduler.PopPendingOperations(false);
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();
@@ -358,7 +358,7 @@ void Rasterizer::DispatchIndirect(VAddr address, u32 offset, u32 size) {
     RENDERER_TRACE;
 
     FlushPeriodically();
-    scheduler.PopPendingOperations();
+    scheduler.PopPendingOperations(false);
 
     const auto& cs_program = liverpool->GetCsRegs();
     const ComputePipeline* pipeline = pipeline_cache.GetComputePipeline();

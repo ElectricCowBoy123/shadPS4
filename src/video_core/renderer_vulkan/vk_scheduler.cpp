@@ -131,9 +131,14 @@ void Scheduler::Wait(u64 tick) {
     work_semaphore.Wait(tick);
 }
 
-void Scheduler::PopPendingOperations() {
+void Scheduler::PopPendingOperations(bool refresh_tick) {
     std::unique_lock lk(pending_ops_mutex);
-    work_semaphore.Refresh();
+    if (pending_ops.empty()) {
+        return;
+    }
+    if (refresh_tick) {
+        work_semaphore.Refresh();
+    }
     while (!pending_ops.empty() && work_semaphore.IsFree(pending_ops.front().gpu_tick)) {
         pending_ops.front().callback();
         pending_ops.pop();

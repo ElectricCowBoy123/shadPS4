@@ -370,7 +370,7 @@ public:
     void Wait(u64 tick);
 
     /// Attempts to execute operations whose tick the GPU has caught up with.
-    void PopPendingOperations();
+    void PopPendingOperations(bool refresh_tick = true);
 
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
