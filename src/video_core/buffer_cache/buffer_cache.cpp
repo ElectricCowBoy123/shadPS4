@@ -118,6 +118,11 @@ void BufferCache::TickFrame() {
     if (std::exchange(fault_process_pending, false)) {
         fault_manager->ProcessFaultBuffer();
     }
+    constexpr u64 ReadbackWindowLifetime = 60;
+    ++frame_counter;
+    std::erase_if(readback_windows, [this](const auto& entry) {
+        return frame_counter - entry.second > ReadbackWindowLifetime;
+    });
 }
 
 void BufferCache::InvalidateMemory(VAddr device_addr, u64 size, bool assume_locks) {
@@ -141,12 +146,32 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
         // GPU-modified ranges come as many small scattered islands,
         // so the download is widened to a window around the request
         constexpr u64 WindowSize = 512_KB;
+        constexpr size_t MaxBatchedWindows = 32;
         const VAddr arena_end = arena->cpu_addr + arena->size_bytes;
         const VAddr window_start =
             std::max<VAddr>(Common::AlignDown(device_addr, WindowSize), arena->cpu_addr);
         const VAddr window_end = std::min<VAddr>(
             std::max<VAddr>(window_start + WindowSize, device_addr + size), arena_end);
-        DownloadMemory(arena, window_start, window_end - window_start, async);
+        boost::container::small_vector<std::pair<VAddr, u64>, MaxBatchedWindows> windows;
+        windows.emplace_back(window_start, window_end - window_start);
+
+        if (!async) {
+            readback_windows[Common::AlignDown(device_addr, WindowSize)] = frame_counter;
+            for (const auto& [addr, last_frame] : readback_windows) {
+                if (windows.size() >= MaxBatchedWindows) {
+                    break;
+                }
+                if (addr < arena->cpu_addr || addr >= arena_end ||
+                    (addr + WindowSize > window_start && addr < window_end)) {
+                    continue;
+                }
+                const u64 len = std::min<VAddr>(addr + WindowSize, arena_end) - addr;
+                if (gpu_modified_ranges.Intersects(addr, len)) {
+                    windows.emplace_back(addr, len);
+                }
+            }
+        }
+        DownloadMemory(arena, windows, async);
         if (is_write) {
             memory_tracker->MarkRegionAsCpuModified(device_addr, size);
         }
@@ -158,27 +183,30 @@ void BufferCache::ReadMemory(VAddr device_addr, u64 size, bool is_write, bool as
     }
 }
 
-void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async) {
+void BufferCache::DownloadMemory(const Buffer* arena,
+                                 std::span<const std::pair<VAddr, u64>> windows, bool async) {
     boost::container::small_vector<vk::BufferCopy, 1> copies;
     u64 total_size_bytes = 0;
     const VAddr arena_base = arena->cpu_addr;
-    memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
-        const auto add_download = [&](VAddr start, VAddr end) {
-            const u64 new_offset = start - arena_base;
-            const u64 new_size = end - start;
-            copies.push_back(vk::BufferCopy{
-                .srcOffset = new_offset,
-                .dstOffset = total_size_bytes,
-                .size = new_size,
-            });
-            // Align up to avoid cache conflicts
-            constexpr u64 align = 64ULL;
-            constexpr u64 mask = ~(align - 1ULL);
-            total_size_bytes += (new_size + align - 1) & mask;
-        };
-        gpu_modified_ranges.ForEachInRange(address, size, add_download);
-        gpu_modified_ranges.Subtract(address, size);
-    });
+    for (const auto& [device_addr, size] : windows) {
+        memory_tracker->ForEachDownloadRange<false>(device_addr, size, [&](u64 address, u64 size) {
+            const auto add_download = [&](VAddr start, VAddr end) {
+                const u64 new_offset = start - arena_base;
+                const u64 new_size = end - start;
+                copies.push_back(vk::BufferCopy{
+                    .srcOffset = new_offset,
+                    .dstOffset = total_size_bytes,
+                    .size = new_size,
+                });
+                // Align up to avoid cache conflicts
+                constexpr u64 align = 64ULL;
+                constexpr u64 mask = ~(align - 1ULL);
+                total_size_bytes += (new_size + align - 1) & mask;
+            };
+            gpu_modified_ranges.ForEachInRange(address, size, add_download);
+            gpu_modified_ranges.Subtract(address, size);
+        });
+    }
     if (total_size_bytes == 0) {
         return;
     }
@@ -189,15 +217,18 @@ void BufferCache::DownloadMemory(const Buffer* arena, VAddr device_addr, u64 siz
     }
     runtime.CopyBuffer(arena, download.buffer, copies);
 
-    const auto write_data = [this, arena_base, device_addr, size, download, async,
-                             copies = std::move(copies)] {
+    const auto write_data = [this, arena_base, download, async, copies = std::move(copies),
+                             windows = boost::container::small_vector<std::pair<VAddr, u64>, 1>(
+                                 windows.begin(), windows.end())] {
         download.Invalidate();
         for (const auto& copy : copies) {
             auto* dst_addr = std::bit_cast<u8*>(arena_base + copy.srcOffset);
             memory->TryWriteBacking(dst_addr, download.mapped + (copy.dstOffset - download.offset),
                                     copy.size);
         }
-        memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        for (const auto& [device_addr, size] : windows) {
+            memory_tracker->UnmarkRegionAsGpuModified(device_addr, size, false);
+        }
 
         if (async) {
             staging_pool.FreeDeferred(download);

@@ -4,6 +4,9 @@
 #pragma once
 
 #include <deque>
+#include <span>
+#include <unordered_map>
+#include <utility>
 #include <boost/container/small_vector.hpp>
 
 #include "common/enum.h"
@@ -144,7 +147,8 @@ private:
 
     void EnsureResident(const Buffer* arena, u64 first_block, u64 last_block);
 
-    void DownloadMemory(const Buffer* arena, VAddr device_addr, u64 size, bool async);
+    void DownloadMemory(const Buffer* arena, std::span<const std::pair<VAddr, u64>> windows,
+                        bool async);
 
     bool SynchronizeMemory(const Buffer* arena, VAddr device_addr, u32 size, bool is_written,
                            bool is_texel_buffer);
@@ -168,6 +172,8 @@ private:
     std::unique_ptr<FaultManager> fault_manager;
     std::unique_ptr<Buffer> bda_pagetable_buffer;
     bool fault_process_pending{};
+    std::unordered_map<VAddr, u64> readback_windows;
+    u64 frame_counter{};
 
     std::array<const Buffer*, NUM_ARENA_PAGES> address_space{};
     std::deque<Buffer> arenas;
