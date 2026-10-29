@@ -1076,7 +1076,18 @@ void TextureCache::GarbageCollectImages() {
     if (instance.CanReportMemoryUsage()) {
         total_used_memory = instance.GetDeviceMemoryUsage();
     }
-    if (total_used_memory < trigger_gc_memory) {
+    const size_t num_images = slot_images.Size();
+    const size_t num_views = slot_image_views.Size();
+    if (num_images >= MAX_IMAGES / 4 * 3 || num_views >= MAX_IMAGE_VIEWS / 4 * 3) {
+        if (!slot_pressure) {
+            LOG_WARNING(Render_Vulkan, "Collecting images, {} image and {} view slots in use",
+                        num_images, num_views);
+        }
+        slot_pressure = true;
+    } else if (num_images < MAX_IMAGES / 2 && num_views < MAX_IMAGE_VIEWS / 2) {
+        slot_pressure = false;
+    }
+    if (total_used_memory < trigger_gc_memory && !slot_pressure) {
         return;
     }
     bool pressured = false;
@@ -1087,11 +1098,11 @@ void TextureCache::GarbageCollectImages() {
     boost::container::small_vector<ImageId, 8> maybe_download;
 
     const auto configure = [&](bool allow_aggressive) {
-        pressured = total_used_memory >= pressure_gc_memory;
+        pressured = slot_pressure || total_used_memory >= pressure_gc_memory;
         aggresive = allow_aggressive && total_used_memory >= critical_gc_memory;
         ticks_to_destroy = aggresive ? 160 : pressured ? 80 : 16;
         ticks_to_destroy = std::min(ticks_to_destroy, gc_tick);
-        num_deletions = aggresive ? 40 : pressured ? 20 : 10;
+        num_deletions = slot_pressure ? 256 : aggresive ? 40 : pressured ? 20 : 10;
     };
     const auto clean_up = [&](Image& image) {
         if (num_deletions == 0) {
@@ -1124,7 +1135,7 @@ void TextureCache::GarbageCollectImages() {
                 aggresive = false;
                 return false;
             }
-            if (pressured && total_used_memory < pressure_gc_memory) {
+            if (pressured && !slot_pressure && total_used_memory < pressure_gc_memory) {
                 num_deletions >>= 1;
                 pressured = false;
             }
